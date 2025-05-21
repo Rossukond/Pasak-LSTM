@@ -22,7 +22,7 @@ from flask_cors import CORS
 
 
 app = Flask(__name__)
-CORS(app, origins="http://localhost:5173", supports_credentials=True)
+CORS(app)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -56,21 +56,17 @@ def upload_file():
 
         try:
             forecast_days = int(request.form.get('forecastDays'))
-            epochs_per_day = json.loads(request.form.get('epochsPerDay'))  # ✅ รับเป็น list เช่น [50, 50, 50, ...]
-            feature_columns = json.loads(request.form.get('featureColumns'))  # ✅ เช่น ["Rainfall, mm.", "S.3", ...]
+            epochs_per_day = json.loads(request.form.get('epochsPerDay'))
+            feature_columns = json.loads(request.form.get('featureColumns'))
 
-            print(forecast_days)
-            # ✅ โหลดและแบ่งข้อมูล
             df = pd.read_csv(file_path)
             df = df.dropna().reset_index(drop=True)
 
-            # แบ่ง 70% train, 30% test
             split_idx = int(len(df) * 0.7)
             df_train = df.iloc[:split_idx].copy()
             df_test = df.iloc[split_idx:].copy()
 
-            # ✅ เรียกใช้ฟังก์ชัน
-            results = forecast_multiple_days( 
+            results = forecast_multiple_days(
                 df_train=df_train,
                 df_test=df_test,
                 feature_columns=feature_columns,
@@ -78,10 +74,18 @@ def upload_file():
                 epochs_per_day=epochs_per_day
             )
 
-            print('////////////////////////////////////////////////////')
-            print(results)
-            print('////////////////////////////////////////////////////')
-            return results
+            # แปลง DataFrame ในผลลัพธ์ให้เป็น JSON-serializable
+            def serialize_results(results):
+                return {
+                    'all_results': results['all_results'],
+                    'train_results': {day: df.to_dict(orient='records') for day, df in results['train_results'].items()},
+                    'test_results': {day: df.to_dict(orient='records') for day, df in results['test_results'].items()}
+                }
+
+            results_serializable = serialize_results(results)
+
+            return jsonify(results_serializable)
+
         except Exception as e:
             print("Forecast error:", e)
             return jsonify({'message': 'Processing failed', 'error': str(e)}), 500
@@ -89,24 +93,56 @@ def upload_file():
         return jsonify({'message': 'Invalid file type'}), 400
 
 
-# ใน Flask หรือ FastAPI หรือ Django
-@app.route('/api/train', methods=['POST'])
-def train_model():
-    # ฝึกโมเดล...
-    results = train_and_forecast()  # ฟังก์ชันฝึกโมเดล
 
-    # บันทึกผลลัพธ์ลงไฟล์หรือฐานข้อมูล
-    with open('results/results_day1.json', 'w') as f:
-        json.dump(results, f)
+# # ใน Flask หรือ FastAPI หรือ Django
+# @app.route('/api/train', methods=['POST'])
+# def train_model():
+#     results = train_and_forecast()  # สมมติได้ DataFrame
 
-    return jsonify({"status": "success", "message": "Training completed."})
+#     # แปลง DataFrame เป็น list ของ dict
+#     if hasattr(results, "to_dict"):
+#         results_serializable = results.to_dict(orient='records')
+#     else:
+#         results_serializable = results
+
+#     # บันทึกลงไฟล์
+#     with open('results/results_day1.json', 'w') as f:
+#         json.dump(results_serializable, f)
+
+#     return jsonify({"status": "success", "message": "Training completed."})
 
 
-@app.route('/api/results', methods=['GET'])
+@app.route("/api/results")
 def get_results():
-    with open('results/results_day1.json', 'r') as f:
-        results = json.load(f)
-    return jsonify(results)
+    try:
+        # โหลด metric (R, RMSE, NSE) ต่อวัน
+        with open('results/results_day1.json', 'r') as f:
+            all_results = json.load(f)
+
+        # โหลดผลพยากรณ์ที่ถูกจัดเก็บไว้แยกต่างหาก
+        with open('results/train_results_day1.json', 'r') as f:
+            train_results = json.load(f)
+
+        with open('results/test_results_day1.json', 'r') as f:
+            test_results = json.load(f)
+
+        results = {
+            "all_results": all_results,
+            "train_results": train_results,
+            "test_results": test_results
+        }
+
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+    except Exception as e:
+        print("Error loading results:", e)
+        return jsonify({"message": "Failed to load results", "error": str(e)}), 500
+
+
 
 
 
@@ -317,13 +353,40 @@ def forecast_multiple_days(df_train, df_test, feature_columns, forecast_days,epo
         }
 
         # สร้าง dynamic variable ชื่อ results_metrics_day{n}
-        # globals()[f'results_metrics_day{day}'] = results
+        globals()[f'results_metrics_day{day}'] = results
 
         # สร้าง DataFrame จากข้อมูล
 
-        results_df = pd.DataFrame(results[f'n={day}'])
+        results_df = pd.DataFrame({
+            'Train_r': [r_train],
+            'Train_RMSE': [rmse_train],
+            'Train_NSE': [nse_train],
+            'Test_r': [r_test],
+            'Test_RMSE': [rmse_test],
+            'Test_NSE': [nse_test]
+        })
+
+
+        results_metrics = globals()[f'results_metrics_day{day}']
+        print(results_metrics[f'Training+{day}']['RMSE'])
+
+
         train_rmse = np.sqrt(history.history['loss'])
-        all_results.append(results[f'n={day}'])
+        
+        all_results.append({
+            'day': day,
+            'train': {
+                'R': results[f'Training+{day}']['R'],
+                'RMSE': results[f'Training+{day}']['RMSE'],
+                'NSE': results[f'Training+{day}']['NSE']
+            },
+            'test': {
+                'R': results[f'testing+{day}']['R'],
+                'RMSE': results[f'testing+{day}']['RMSE'],
+                'NSE': results[f'testing+{day}']['NSE']
+            }
+        })
+
         print('-----------------------------------')
         print("Train Predictions:")
         print(df_train[[f'Inflow, cms+{day}',f'Pred Inflow, cms+{day}']].head())
@@ -338,59 +401,14 @@ def forecast_multiple_days(df_train, df_test, feature_columns, forecast_days,epo
         # plot_rmse_vs_epoch(custom_callback.train_rmse, custom_callback.test_rmse, day)
         # plot_comparison(df_train, df_test, Y_train, train_predictions, Y_test, test_predictions, day)
 
-    return all_results
+    return {
+    'all_results': all_results,
+    'train_results': all_results_train,
+    'test_results': all_results_test,
+    }
+
 
 # เริ่มการทำงาน
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
-    # forecast_days = 2
-    # epochs_per_day = [4, 10, 600, 600, 800, 800, 1000]  # สามารถกำหนด epochs ของแต่ละวัน
-
-    # โหลดข้อมูลและเรียกใช้ฟังก์ชันพยากรณ์
-    # df_train, df_test = load_data('data/pasak-2014-2023.csv', train_year_range=(2018, 2023), test_year_range=(2014, 2017))
-    # feature_columns = ['Rainfall, mm.', 'S.3', 'S.4B', 'S.42', 'S.14', 'Inflow, cms']
-    # print(df_train.index)
-    # print(df_test.index)
-    # print('--------- Train Data ---------')
-    # print(df_train.head())
-    # print('--------- Test Data ---------')
-    # print(df_test.head())
-
-    # forecast_multiple_days(df_train, df_test, feature_columns, forecast_days,epochs_per_day)
-    # df_train.to_csv('/content/df_train.csv', index=False)
-    # df_test.to_csv('/content/df_test.csv', index=False)
-
-# แสดงค่าตัวชี้วัด RMSE สำหรับทุกวัน
-# for day in range(1, forecast_days + 1):
-#     variable_name = f'epoch_rmse_data_day{day}'
-
-#     if variable_name in globals():
-#         results_df = pd.DataFrame(globals()[variable_name])
-
-#         print(f"\n========= {variable_name} =========")
-#         print(f"🔍 ขนาดข้อมูลล่าสุด: {len(globals()[variable_name])} entries")  # ปิดวงเล็บให้ถูกต้อง
-#         print(results_df)
-#         print('-----------------------------------------')
-#     else:
-#         print(f"\n⚠️ ไม่พบข้อมูลสำหรับ {variable_name}")
-
-# for day in all_results_train.keys():
-#     print(f'\n========= Train Data Day {day} =========')
-#     print(all_results_train[day].to_string(index=False))  # แสดงข้อมูล Train ของวันนั้น
-#     print(f'\n========= Test Data Day {day} =========')
-#     print(all_results_test[day].to_string(index=False))   # แสดงข้อมูล Test ของวันนั้น
-#     print('-------------------------------------')
-
-# # แสดงค่าตัวชี้วัดสำหรับทุกวัน
-# for day in range(1, forecast_days + 1):
-#     variable_name = f'results_metrics_day{day}'
-
-#     if variable_name in globals():
-#         results = globals()[variable_name]
-#         results_df = pd.DataFrame(results)
-
-#         print(f"\n========= Metrics for Day {day} =========")
-#         print(results_df)
-#         print('-----------------------------------------')
-#     else:
-#         print(f"\n⚠️ ไม่พบข้อมูลสำหรับ Day {day}")
+    

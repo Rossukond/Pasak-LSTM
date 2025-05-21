@@ -49,7 +49,7 @@ const App = () => {
           }}
         >
           <h2 style={{ textAlign: "center", fontWeight: "bold" }}>OUTPUT</h2>
-          {/* <Results/> */}
+          <Results/>
         </div>
       </div>
     </div>
